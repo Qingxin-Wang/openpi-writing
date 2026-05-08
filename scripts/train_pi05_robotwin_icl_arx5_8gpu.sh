@@ -37,7 +37,11 @@ export NUM_WORKERS="${NUM_WORKERS:-16}"
 export GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-16}"
 
 # === Paths (all absolute) ===================================================
-WORK_DIR=/wuji-vepfs/wuji-il/huangsiqiao/openpi-pi05
+# Derive WORK_DIR from BASH_SOURCE so the launcher works regardless of where
+# the upstream openpi tree is mounted (now lives at .../openpi-pi05/external/openpi
+# under the ReCamMaster baseline/openpi worktree; mirrors starvla _launch.sh).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+WORK_DIR="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
 VENV_PYTHON=${WORK_DIR}/.venv/bin/python
 TORCHRUN=${WORK_DIR}/.venv/bin/torchrun
 DATASET_DIR=/wuji-vepfs/wuji-il/huangsiqiao/data/robotwin-arx5-lerobot
