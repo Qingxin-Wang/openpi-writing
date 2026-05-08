@@ -159,12 +159,13 @@ class Unnormalize(DataTransformFn):
         if self.norm_stats is None:
             return data
 
-        # Make sure that all the keys in the norm stats are present in the data.
+        # The output dict only contains "actions" — norm_stats may also have a "state" entry,
+        # so don't enforce strict key matching here.
         return apply_tree(
             data,
             self.norm_stats,
             self._unnormalize_quantile if self.use_quantiles else self._unnormalize,
-            strict=True,
+            strict=False,
         )
 
     def _unnormalize(self, x, stats: NormStats):

@@ -20,6 +20,7 @@ import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
+import openpi.policies.robotwin_policy as robotwin_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
@@ -81,6 +82,10 @@ class DataConfig:
     model_transforms: _transforms.Group = dataclasses.field(default_factory=_transforms.Group)
     # If true, will use quantile normalization. Otherwise, normal z-score normalization will be used.
     use_quantile_norm: bool = False
+
+    # If set, restrict the LeRobotDataset to these episode indices. None means use all episodes.
+    # Used by configs that need a curated train split (e.g. RoboTwin ICL holdout filter).
+    episodes: tuple[int, ...] | None = None
 
     # Names of keys that will be used by the data loader to generate the action sequence. The length of the
     # sequence is defined by the `action_horizon` field in the model config. This should be adjusted if your
@@ -352,6 +357,59 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
             repack_transforms=repack_transform,
             data_transforms=data_transforms,
             model_transforms=model_transforms,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotRoboTwinDataConfig(DataConfigFactory):
+    """RoboTwin ICL paired-v3 (arx-x5) — 20 train tasks, episodes filtered from
+    the 25-task on-disk LeRobot dataset via the ICL holdout list.
+
+    The on-disk dataset has 4 cameras (head/left/right/third_view); we drop ``third_view``
+    in the repack transform so it never reaches the policy.
+    """
+
+    action_sequence_keys: Sequence[str] = ("action",)
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/image/head": "observation.images.head_camera",
+                        "observation/image/left": "observation.images.left_camera",
+                        "observation/image/right": "observation.images.right_camera",
+                        "observation/state": "observation.state",
+                        "actions": "action",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+        data_transforms = _transforms.Group(
+            inputs=[robotwin_policy.RoboTwinInputs(model_type=model_config.model_type)],
+            outputs=[robotwin_policy.RoboTwinOutputs()],
+        )
+        model_transforms = ModelTransformFactory()(model_config)
+
+        if self.repo_id is tyro.MISSING or self.repo_id is None:
+            raise ValueError("LeRobotRoboTwinDataConfig requires repo_id pointing at the on-disk dataset")
+        train_eps, val_eps = robotwin_policy.compute_icl_episode_lists(self.repo_id)
+        logging.info(f"RoboTwin ICL split: train_eps={len(train_eps)}, val_eps={len(val_eps)}")
+        if (len(train_eps), len(val_eps)) != (3000, 1000):
+            raise ValueError(
+                f"Unexpected ICL split sizes (train={len(train_eps)}, val={len(val_eps)}); "
+                "the dataset has been re-converted or the holdout set is wrong"
+            )
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=self.action_sequence_keys,
+            episodes=tuple(train_eps),
         )
 
 
@@ -929,6 +987,51 @@ _CONFIGS = [
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
         num_train_steps=20_000,
+    ),
+    #
+    # RoboTwin ICL paired-v3 (arx-x5) — pi0.5 baseline for ReCamMaster comparison.
+    #
+    TrainConfig(
+        name="pi05_robotwin_icl_arx_x5",
+        project_name="wam-baseline",
+        checkpoint_base_dir="/wuji-vepfs/wuji-il/huangsiqiao/data/checkpoints",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m",
+        ),
+        data=LeRobotRoboTwinDataConfig(
+            repo_id="/wuji-vepfs/wuji-il/huangsiqiao/data/robotwin-arx5-lerobot",
+            assets=AssetsConfig(asset_id="robotwin-icl-arx-x5"),
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/wuji-vepfs/wuji-il/lzicong/cache/openpi/openpi-assets/checkpoints/pi05_base/params"
+        ),
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m",
+        ).get_freeze_filter(),
+        ema_decay=None,
+        fsdp_devices=4,
+        num_workers=16,
+        # Aligned with ReCamMaster ICL paired-v2 launcher (16-GPU, bs=1/GPU = global 16,
+        # warmup 500, lr 5e-5 constant after warmup -- linear-warmup -> ConstantLR per
+        # ReCamMaster/diffsynth/diffusion/runner.py:42-60). num_train_steps is an upper
+        # bound -- training is intended to be interrupted manually when converged.
+        num_train_steps=10_000_000,
+        batch_size=16,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500,
+            peak_lr=5e-5,
+            decay_steps=10_000_000,  # cosmetic; peak == decay_lr -> flat after warmup
+            decay_lr=5e-5,
+        ),
+        save_interval=2_500,
+        keep_period=20_000,
     ),
     #
     # Debugging configs.

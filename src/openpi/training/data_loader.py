@@ -16,6 +16,48 @@ import openpi.training.config as _config
 from openpi.training.droid_rlds_dataset import DroidRldsDataset
 import openpi.transforms as _transforms
 
+
+def _patch_lerobot_sparse_episodes() -> None:
+    """Patch LeRobotDataset so episodes=[...] (sparse, non-contiguous-from-zero) works.
+
+    Upstream lerobot v0.1.0 builds episode_data_index["from"/"to"] as size=len(filter)
+    tensors (position-indexed), but LeRobotDataset._get_query_indices then indexes them
+    by raw episode_index. For any non-contiguous-from-zero filter (RoboTwin ICL split
+    included) this raises IndexError or silently reads wrong bounds.
+
+    We surgically patch _get_query_indices to translate raw ep_idx -> position-in-filter
+    via a lookup dict built once per dataset instance. The position-indexed
+    episode_data_index is left intact (other call sites like check_timestamps_sync
+    rely on its small size).
+    """
+    _LeRobotDataset = lerobot_dataset.LeRobotDataset
+    if getattr(_LeRobotDataset, "_openpi_sparse_patched", False):
+        return
+
+    _orig_init = _LeRobotDataset.__init__
+    _orig_get_query_indices = _LeRobotDataset._get_query_indices
+
+    def _patched_init(self, *args, **kwargs):
+        _orig_init(self, *args, **kwargs)
+        if self.episodes is not None:
+            self._openpi_ep_to_pos = {ep: pos for pos, ep in enumerate(self.episodes)}
+        else:
+            self._openpi_ep_to_pos = None
+
+    def _patched_get_query_indices(self, idx, ep_idx):
+        ep_to_pos = getattr(self, "_openpi_ep_to_pos", None)
+        if ep_to_pos is not None:
+            ep_idx = ep_to_pos[ep_idx]
+        return _orig_get_query_indices(self, idx, ep_idx)
+
+    _LeRobotDataset.__init__ = _patched_init
+    _LeRobotDataset._get_query_indices = _patched_get_query_indices
+    _LeRobotDataset._openpi_sparse_patched = True
+    logging.info("Patched LeRobotDataset._get_query_indices for sparse episodes filter")
+
+
+_patch_lerobot_sparse_episodes()
+
 T_co = TypeVar("T_co", covariant=True)
 
 
@@ -138,11 +180,22 @@ def create_torch_dataset(
         return FakeDataset(model_config, num_samples=1024)
 
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
+
+    episodes = list(data_config.episodes) if data_config.episodes is not None else None
+    if episodes is not None:
+        logging.info(
+            f"Restricting LeRobotDataset to {len(episodes)} of {dataset_meta.total_episodes} episodes "
+            f"(filter set on DataConfig.episodes)"
+        )
+
     dataset = lerobot_dataset.LeRobotDataset(
         data_config.repo_id,
+        episodes=episodes,
         delta_timestamps={
             key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
         },
+        tolerance_s=1 / dataset_meta.fps,  # Allow up to one frame of timestamp drift
+        video_backend="pyav",
     )
 
     if data_config.prompt_from_task:
@@ -240,7 +293,24 @@ def create_data_loader(
         framework: The framework to use ("jax" or "pytorch").
     """
     data_config = config.data.create(config.assets_dirs, config.model)
-    logging.info(f"data_config: {data_config}")
+    eps = data_config.episodes
+    eps_summary = (
+        f"None"
+        if eps is None
+        else f"{len(eps)} ep (head={list(eps[:3])}, tail={list(eps[-3:])})"
+    )
+    norm_keys = sorted(data_config.norm_stats.keys()) if data_config.norm_stats else None
+    logging.info(
+        "data_config: repo_id=%s asset_id=%s use_quantile_norm=%s prompt_from_task=%s "
+        "action_sequence_keys=%s episodes=%s norm_stats=%s",
+        data_config.repo_id,
+        data_config.asset_id,
+        data_config.use_quantile_norm,
+        data_config.prompt_from_task,
+        data_config.action_sequence_keys,
+        eps_summary,
+        norm_keys,
+    )
 
     if data_config.rlds_data_dir is not None:
         return create_rlds_data_loader(
