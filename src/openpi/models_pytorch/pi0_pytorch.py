@@ -1,5 +1,6 @@
 import logging
 import math
+import os
 
 import torch
 from torch import Tensor
@@ -109,7 +110,10 @@ class PI0Pytorch(nn.Module):
             self.action_time_mlp_out = nn.Linear(action_expert_config.width, action_expert_config.width)
 
         torch.set_float32_matmul_precision("high")
-        if config.pytorch_compile_mode is not None:
+        # OPENPI_DISABLE_COMPILE=1 bypasses torch.compile entirely — used for
+        # serving where first-call latency from max-autotune (10-30 min) costs
+        # more than runtime savings over a finite eval rollout.
+        if config.pytorch_compile_mode is not None and os.environ.get("OPENPI_DISABLE_COMPILE", "0") != "1":
             self.sample_actions = torch.compile(self.sample_actions, mode=config.pytorch_compile_mode)
 
         # Initialize gradient checkpointing flag

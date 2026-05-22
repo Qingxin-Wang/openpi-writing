@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Pi0.5 finetune on RoboTwin ICL paired-v3 (arx-x5) -- baseline for ReCamMaster.
+# Pi0 finetune on RoboTwin ICL paired-v3 (arx-x5) -- baseline for ReCamMaster.
 #
-# 8 GPU single-node. Style mirrors
-#   ReCamMaster-starvla/scripts/baseline_starvla/_launch.sh
-# (PAI-DLC env injection, env-overridable knobs, preflight, dry-run).
+# 8 GPU single-node. Sibling of train_pi05_robotwin_icl_arx5_8gpu.sh -- only the
+# base ckpt and config name differ.
 #
 # Schedule aligns with reference VAM launcher
 #   src/vam/examples/wanvideo/human2robot/launch_icl_paired_v2_alltasks_16g_50k.sh
@@ -28,7 +27,6 @@ fi
 
 # === Schedule (knobs env-overridable, defaults match TrainConfig) ===========
 # global_bs = 8 GPU x per_device 2 = 16 (TrainConfig.batch_size).
-# pi0.5 LoRA + grad checkpointing fits per-device 2 trivially on H20-96GB.
 export NUM_TRAIN_STEPS="${NUM_TRAIN_STEPS:-10000000}"
 export SAVE_INTERVAL="${SAVE_INTERVAL:-2500}"
 export KEEP_PERIOD="${KEEP_PERIOD:-20000}"
@@ -37,23 +35,18 @@ export NUM_WORKERS="${NUM_WORKERS:-16}"
 export GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-16}"
 
 # === Paths (all absolute) ===================================================
-# Derive WORK_DIR from BASH_SOURCE so the launcher works regardless of where
-# the upstream openpi tree is mounted (now lives at .../openpi-pi05/external/openpi
-# under the ReCamMaster baseline/openpi worktree; mirrors starvla _launch.sh).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 WORK_DIR="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
 VENV_PYTHON=${WORK_DIR}/.venv/bin/python
 TORCHRUN=${WORK_DIR}/.venv/bin/torchrun
 DATASET_DIR=/wuji-vepfs/wuji-il/huangsiqiao/data/robotwin-arx5-lerobot
-NORM_STATS_DIR=${WORK_DIR}/assets/pi05_robotwin_icl_arx_x5/robotwin-icl-arx-x5
-PI05_BASE_PT_CKPT=/wuji-vepfs/wuji-il/huangsiqiao/data/openpi-assets/checkpoints/pi05_base_pytorch
+NORM_STATS_DIR=${WORK_DIR}/assets/pi0_robotwin_icl_arx_x5/robotwin-icl-arx-x5
+PI0_BASE_PT_CKPT=/wuji-vepfs/wuji-il/huangsiqiao/data/openpi-assets/checkpoints/pi0_base_pytorch
 CHECKPOINT_BASE_DIR=/wuji-vepfs/wuji-il/huangsiqiao/data/checkpoints
 
 # === Run identity ===========================================================
-# Run name encodes model + dataset + date so the wam-baseline wandb project
-# (shared with other baselines: oft, fast, gr00t, ...) stays legible.
 DATE_TAG=$(date +%Y%m%d_%H%M%S)
-RUN_TAG="${RUN_TAG:-pi05_robotwin_arx5_icl}"
+RUN_TAG="${RUN_TAG:-pi0_robotwin_arx5_icl}"
 EXP_NAME="${EXP_NAME:-${RUN_TAG}_${DATE_TAG}}"
 
 # === wandb ==================================================================
@@ -80,7 +73,7 @@ export NCCL_TIMEOUT="${NCCL_TIMEOUT:-1000}"
 # wandb relies on them to reach api.wandb.ai from inside the job sandbox.
 
 # === Preflight ==============================================================
-echo "=== pi05_robotwin_icl_arx5 8G launch preflight ==="
+echo "=== pi0_robotwin_icl_arx5 8G launch preflight ==="
 echo "  work_dir         = ${WORK_DIR}"
 echo "  nodes=${NUM_MACHINES}  gpus_per_node=${GPUS_PER_NODE}  total=${TOTAL_PROCESSES}  rank=${MACHINE_RANK}"
 echo "  master           = ${MASTER_ADDR}:${MASTER_PORT}"
@@ -92,8 +85,8 @@ echo "  global_batch     = ${GLOBAL_BATCH_SIZE}  (per-device $((GLOBAL_BATCH_SIZ
 echo "  num_workers      = ${NUM_WORKERS}"
 echo "  dataset          = ${DATASET_DIR}"
 echo "  norm_stats       = ${NORM_STATS_DIR}"
-echo "  pi05_base_pt_ckpt= ${PI05_BASE_PT_CKPT}"
-echo "  ckpt_out         = ${CHECKPOINT_BASE_DIR}/pi05_robotwin_icl_arx_x5/${EXP_NAME}"
+echo "  pi0_base_pt_ckpt = ${PI0_BASE_PT_CKPT}"
+echo "  ckpt_out         = ${CHECKPOINT_BASE_DIR}/pi0_robotwin_icl_arx_x5/${EXP_NAME}"
 echo "  wandb_mode       = ${WANDB_MODE}"
 
 test -x "${VENV_PYTHON}" || { echo "ERROR: missing venv python: ${VENV_PYTHON}" >&2; exit 1; }
@@ -101,16 +94,16 @@ test -x "${TORCHRUN}" || { echo "ERROR: missing torchrun: ${TORCHRUN}" >&2; exit
 test -d "${DATASET_DIR}" || { echo "ERROR: missing dataset: ${DATASET_DIR}" >&2; exit 1; }
 test -f "${NORM_STATS_DIR}/norm_stats.json" || {
     echo "ERROR: missing norm stats: ${NORM_STATS_DIR}/norm_stats.json" >&2
-    echo "       Run: ${VENV_PYTHON} ${WORK_DIR}/scripts/compute_norm_stats.py --config-name=pi05_robotwin_icl_arx_x5" >&2
+    echo "       Run: ${VENV_PYTHON} ${WORK_DIR}/scripts/compute_norm_stats.py --config-name=pi0_robotwin_icl_arx_x5" >&2
     exit 1
 }
-test -f "${PI05_BASE_PT_CKPT}/model.safetensors" || {
-    echo "ERROR: missing pi05_base PyTorch ckpt: ${PI05_BASE_PT_CKPT}/model.safetensors" >&2
+test -f "${PI0_BASE_PT_CKPT}/model.safetensors" || {
+    echo "ERROR: missing pi0_base PyTorch ckpt: ${PI0_BASE_PT_CKPT}/model.safetensors" >&2
     echo "       Convert it once with:" >&2
     echo "         ${VENV_PYTHON} ${WORK_DIR}/examples/convert_jax_model_to_pytorch.py \\" >&2
-    echo "           --checkpoint_dir <pi05_base JAX dir> \\" >&2
-    echo "           --config_name pi05_aloha_pen_uncap \\" >&2
-    echo "           --output_path ${PI05_BASE_PT_CKPT}" >&2
+    echo "           --checkpoint_dir <pi0_base JAX dir> \\" >&2
+    echo "           --config_name pi0_aloha_pen_uncap \\" >&2
+    echo "           --output_path ${PI0_BASE_PT_CKPT}" >&2
     exit 1
 }
 
@@ -128,7 +121,7 @@ exec "${TORCHRUN}" \
     --master_addr="${MASTER_ADDR}" \
     --master_port="${MASTER_PORT}" \
     "${WORK_DIR}/scripts/train_pytorch.py" \
-    pi05_robotwin_icl_arx_x5 \
+    pi0_robotwin_icl_arx_x5 \
     --exp-name="${EXP_NAME}" \
     --batch-size="${GLOBAL_BATCH_SIZE}" \
     --num-train-steps="${NUM_TRAIN_STEPS}" \
