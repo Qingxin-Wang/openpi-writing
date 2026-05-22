@@ -21,6 +21,7 @@ import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
 import openpi.policies.robotwin_policy as robotwin_policy
+import openpi.policies.writing_policy as writing_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
@@ -401,6 +402,77 @@ class LeRobotRoboTwinDataConfig(DataConfigFactory):
             raise ValueError(
                 f"Unexpected ICL split sizes (train={len(train_eps)}, val={len(val_eps)}); "
                 "the dataset has been re-converted or the holdout set is wrong"
+            )
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=self.action_sequence_keys,
+            episodes=tuple(train_eps),
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotWritingDataConfig(DataConfigFactory):
+    """Wuji 毛笔 writing bundle, teleop subset.
+
+    On-disk LeRobot v2.1 at ``/wuji-vepfs/wuji-il/huangsiqiao/data/writing_bundle/teleop``:
+    487 episodes, 54-D state/action (dual ARX-5 + dual dex hands), 30 fps,
+    4 cams (``stereo_left/right``, ``cam_left_wrist``, ``cam_right_wrist``;
+    no head). 10 tasks: ``the robot writes digit zero..nine``.
+
+    Train/val split is taken straight from VAM
+    (``WujiWritingDataset._apply_split`` in ReCamMaster ``wuji_writing_dataset.py``)
+    via ``compute_writing_episode_lists``: ``random.Random(42).shuffle`` over
+    episodes.jsonl order, then ``val_ratio=0.1`` of the shuffled order → 48
+    held-out, 439 trained (``max(1, int(487*0.1))=48``). The same constants
+    must stay in sync with VAM for fair comparison.
+
+    Pi0/Pi0.5 has no native ego-reference conditioning, so the sibling
+    ``ego_ref`` subset of the bundle is intentionally not consumed here.
+    """
+
+    val_ratio: float = writing_policy.WRITING_DEFAULT_VAL_RATIO
+    split_seed: int = writing_policy.WRITING_DEFAULT_SPLIT_SEED
+    action_sequence_keys: Sequence[str] = ("action",)
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/image/base": "observation.images.stereo_left",
+                        "observation/image/left_wrist": "observation.images.cam_left_wrist",
+                        "observation/image/right_wrist": "observation.images.cam_right_wrist",
+                        "observation/state": "observation.state",
+                        "actions": "action",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+        data_transforms = _transforms.Group(
+            inputs=[writing_policy.WritingInputs(model_type=model_config.model_type)],
+            outputs=[writing_policy.WritingOutputs()],
+        )
+        model_transforms = ModelTransformFactory()(model_config)
+
+        if self.repo_id is tyro.MISSING or self.repo_id is None:
+            raise ValueError("LeRobotWritingDataConfig requires repo_id pointing at writing_bundle/teleop")
+        train_eps, val_eps = writing_policy.compute_writing_episode_lists(
+            self.repo_id, val_ratio=self.val_ratio, seed=self.split_seed
+        )
+        logging.info(
+            f"Wuji writing split: train_eps={len(train_eps)}, val_eps={len(val_eps)} "
+            f"(val_ratio={self.val_ratio}, seed={self.split_seed})"
+        )
+        if (len(train_eps), len(val_eps)) != (439, 48):
+            raise ValueError(
+                f"Unexpected writing split (train={len(train_eps)}, val={len(val_eps)}); "
+                "either the bundle has changed (was 487 episodes) or val_ratio/seed got out of sync with VAM"
             )
 
         return dataclasses.replace(
@@ -1006,6 +1078,9 @@ _CONFIGS = [
             assets=AssetsConfig(asset_id="robotwin-icl-arx-x5"),
             base_config=DataConfig(prompt_from_task=True),
         ),
+        # PyTorch trainer (scripts/train_pytorch.py:441-449) loads from this path; weight_loader
+        # below is JAX-only (scripts/train.py:122). Both kept so either trainer works.
+        pytorch_weight_path="/wuji-vepfs/wuji-il/huangsiqiao/data/openpi-assets/checkpoints/pi05_base_pytorch",
         weight_loader=weight_loaders.CheckpointWeightLoader(
             "/wuji-vepfs/wuji-il/lzicong/cache/openpi/openpi-assets/checkpoints/pi05_base/params"
         ),
@@ -1028,6 +1103,128 @@ _CONFIGS = [
             warmup_steps=500,
             peak_lr=5e-5,
             decay_steps=10_000_000,  # cosmetic; peak == decay_lr -> flat after warmup
+            decay_lr=5e-5,
+        ),
+        save_interval=2_500,
+        keep_period=20_000,
+    ),
+    #
+    # RoboTwin ICL paired-v3 (arx-x5) — pi0 baseline for ReCamMaster comparison.
+    # Sibling to pi05_robotwin_icl_arx_x5: only pi05=False and the base ckpt differ.
+    # Note: under scripts/train_pytorch.py the model is full-FT regardless of paligemma_variant
+    # (gemma_pytorch.py builds via transformers PaliGemmaForConditionalGeneration without LoRA
+    # wiring; freeze_filter is JAX-only). We use plain "gemma_2b" here to be honest about that.
+    #
+    TrainConfig(
+        name="pi0_robotwin_icl_arx_x5",
+        project_name="wam-baseline",
+        checkpoint_base_dir="/wuji-vepfs/wuji-il/huangsiqiao/data/checkpoints",
+        model=pi0_config.Pi0Config(
+            pi05=False,
+            action_dim=32,
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m",
+        ),
+        data=LeRobotRoboTwinDataConfig(
+            repo_id="/wuji-vepfs/wuji-il/huangsiqiao/data/robotwin-arx5-lerobot",
+            assets=AssetsConfig(asset_id="robotwin-icl-arx-x5"),
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        pytorch_weight_path="/wuji-vepfs/wuji-il/huangsiqiao/data/openpi-assets/checkpoints/pi0_base_pytorch",
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/wuji-vepfs/wuji-il/huangsiqiao/data/openpi-assets/checkpoints/pi0_base/params"
+        ),
+        ema_decay=None,
+        fsdp_devices=4,
+        num_workers=16,
+        num_train_steps=10_000_000,
+        batch_size=16,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500,
+            peak_lr=5e-5,
+            decay_steps=10_000_000,
+            decay_lr=5e-5,
+        ),
+        save_interval=2_500,
+        keep_period=20_000,
+    ),
+    #
+    # Wuji 毛笔 writing bundle (54-D, dual ARX-5 + dual dex hands) -- pi0.5 baseline.
+    # action_dim=54 requires the preprocessed base ckpt at .../pi05_base_pytorch_a54
+    # (3 proj layers re-initialised, rest of the ~3B weights kept). See
+    # scripts/convert_base_ckpt_action_dim.py.
+    #
+    TrainConfig(
+        name="pi05_writing",
+        project_name="writing-pi",
+        checkpoint_base_dir="/wuji-vepfs/wuji-il/huangsiqiao/data/checkpoints",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=54,
+            # pi05 default max_token_len=200; 54-D state tokenises to ~150-160
+            # tokens which combined with the prompt overshoots 200 and triggers
+            # truncation warnings every batch. 256 fits comfortably.
+            max_token_len=256,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m",
+        ),
+        data=LeRobotWritingDataConfig(
+            repo_id="/wuji-vepfs/wuji-il/huangsiqiao/data/writing_bundle/teleop",
+            assets=AssetsConfig(asset_id="writing-bundle-teleop"),
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        pytorch_weight_path="/wuji-vepfs/wuji-il/huangsiqiao/data/openpi-assets/checkpoints/pi05_base_pytorch_a54",
+        weight_loader=weight_loaders.NoOpWeightLoader(),
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=54,
+            max_token_len=256,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m",
+        ).get_freeze_filter(),
+        ema_decay=None,
+        fsdp_devices=4,
+        num_workers=16,
+        num_train_steps=10_000_000,
+        batch_size=16,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500,
+            peak_lr=5e-5,
+            decay_steps=10_000_000,
+            decay_lr=5e-5,
+        ),
+        save_interval=2_500,
+        keep_period=20_000,
+    ),
+    #
+    # Wuji 毛笔 writing bundle -- pi0 sibling baseline (same shape, pi05=False, gemma_2b).
+    #
+    TrainConfig(
+        name="pi0_writing",
+        project_name="writing-pi",
+        checkpoint_base_dir="/wuji-vepfs/wuji-il/huangsiqiao/data/checkpoints",
+        model=pi0_config.Pi0Config(
+            pi05=False,
+            action_dim=54,
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m",
+        ),
+        data=LeRobotWritingDataConfig(
+            repo_id="/wuji-vepfs/wuji-il/huangsiqiao/data/writing_bundle/teleop",
+            assets=AssetsConfig(asset_id="writing-bundle-teleop"),
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        pytorch_weight_path="/wuji-vepfs/wuji-il/huangsiqiao/data/openpi-assets/checkpoints/pi0_base_pytorch_a54",
+        weight_loader=weight_loaders.NoOpWeightLoader(),
+        ema_decay=None,
+        fsdp_devices=4,
+        num_workers=16,
+        num_train_steps=10_000_000,
+        batch_size=16,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500,
+            peak_lr=5e-5,
+            decay_steps=10_000_000,
             decay_lr=5e-5,
         ),
         save_interval=2_500,
