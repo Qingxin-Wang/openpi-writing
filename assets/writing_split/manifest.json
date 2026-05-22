@@ -1,0 +1,11 @@
+{
+  "source_repo": "/wuji-vepfs/wuji-il/huangsiqiao/data/writing_bundle/teleop",
+  "source_remote": "https://huggingface.co/datasets/yeeeiii111/wuji-writing",
+  "split_function": "openpi.policies.writing_policy.compute_writing_episode_lists",
+  "vam_parity_source": "ReCamMaster src/vam/examples/wanvideo/human2robot/wuji_writing_dataset.py:_apply_split",
+  "seed": 42,
+  "val_ratio": 0.1,
+  "total_episodes": 487,
+  "n_train": 439,
+  "n_val": 48
+}
