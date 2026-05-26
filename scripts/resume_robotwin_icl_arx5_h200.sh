@@ -74,6 +74,20 @@ TORCHRUN=${WORK_DIR}/.venv/bin/torchrun
 : "${DATASET_DIR:?DATASET_DIR env var required (absolute path to robotwin-arx5-lerobot on H200)}"
 : "${CHECKPOINT_BASE_DIR:?CHECKPOINT_BASE_DIR env var required (where hf_pull_resume_bundle.py landed)}"
 
+# PAI-DLC's env injection occasionally appends trailing whitespace, which silently
+# breaks path concatenation (the launcher's `${CHECKPOINT_BASE_DIR}/<cfg>/<exp>`
+# ends up with a space embedded mid-path). Strip leading/trailing whitespace.
+_trim() {
+    local v="$1"
+    # leading
+    v="${v#"${v%%[![:space:]]*}"}"
+    # trailing
+    v="${v%"${v##*[![:space:]]}"}"
+    printf '%s' "$v"
+}
+DATASET_DIR="$(_trim "${DATASET_DIR}")"
+CHECKPOINT_BASE_DIR="$(_trim "${CHECKPOINT_BASE_DIR}")"
+
 CKPT_RUN_DIR="${CHECKPOINT_BASE_DIR}/${CONFIG_NAME}/${EXP_NAME}"
 CKPT_STEP_DIR="${CKPT_RUN_DIR}/${EXPECTED_STEP}"
 
