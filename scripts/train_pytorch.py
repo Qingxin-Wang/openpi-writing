@@ -438,8 +438,12 @@ def train_loop(config: _config.TrainConfig):
             static_graph=world_size >= 8,  # Enable for 8+ GPUs
         )
 
-    # Load weights from weight_loader if specified (for fine-tuning)
-    if config.pytorch_weight_path is not None:
+    # Load weights from weight_loader if specified (for fine-tuning).
+    # Skip when resuming: load_checkpoint() below would overwrite these anyway,
+    # and skipping means the base ckpt doesn't need to be present on the host
+    # (useful when resuming on a different cluster where only the finetune ckpt
+    # was transferred).
+    if config.pytorch_weight_path is not None and not resuming:
         logging.info(f"Loading weights from: {config.pytorch_weight_path}")
 
         model_path = os.path.join(config.pytorch_weight_path, "model.safetensors")
