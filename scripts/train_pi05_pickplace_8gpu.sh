@@ -23,10 +23,12 @@ if [ "${TOTAL_PROCESSES}" -ne 8 ] && [ "${ALLOW_NON_8:-0}" != "1" ]; then
     exit 1
 fi
 
-# === Schedule (knobs env-overridable, defaults match TrainConfig) ===========
-export NUM_TRAIN_STEPS="${NUM_TRAIN_STEPS:-10000000}"
-export SAVE_INTERVAL="${SAVE_INTERVAL:-2500}"
-export KEEP_PERIOD="${KEEP_PERIOD:-20000}"
+# === Schedule (knobs env-overridable; pick-and-place runs target 20k step) ==
+export NUM_TRAIN_STEPS="${NUM_TRAIN_STEPS:-20000}"
+export SAVE_INTERVAL="${SAVE_INTERVAL:-4000}"
+# KEEP_PERIOD == SAVE_INTERVAL => every saved ckpt is also flagged "keep"
+# (4k/8k/12k/16k/20k all preserved across the 20k-step run).
+export KEEP_PERIOD="${KEEP_PERIOD:-4000}"
 export LOG_INTERVAL="${LOG_INTERVAL:-100}"
 export NUM_WORKERS="${NUM_WORKERS:-16}"
 export GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-16}"
@@ -48,6 +50,9 @@ EXP_NAME="${EXP_NAME:-${RUN_TAG}_${DATE_TAG}}"
 
 # === wandb ==================================================================
 export WANDB_MODE="${WANDB_MODE:-online}"
+# Bake the team entity so DLC workers (which don't inherit local shell env)
+# always land runs in the wuji team workspace, not whoever's API key owner.
+export WANDB_ENTITY="${WANDB_ENTITY:-better_guidance}"
 if [[ "${WANDB_MODE}" != "disabled" && "${WANDB_MODE}" != "offline" ]]; then
     if [[ -z "${WANDB_API_KEY:-}" ]]; then
         echo "ERROR: WANDB_API_KEY env var is required when WANDB_MODE=${WANDB_MODE}." >&2
@@ -75,7 +80,7 @@ echo "  work_dir         = ${WORK_DIR}"
 echo "  nodes=${NUM_MACHINES}  gpus_per_node=${GPUS_PER_NODE}  total=${TOTAL_PROCESSES}  rank=${MACHINE_RANK}"
 echo "  master           = ${MASTER_ADDR}:${MASTER_PORT}"
 echo "  exp_name         = ${EXP_NAME}"
-echo "  num_train_steps  = ${NUM_TRAIN_STEPS} (run-forever sentinel)"
+echo "  num_train_steps  = ${NUM_TRAIN_STEPS}"
 echo "  save_interval    = ${SAVE_INTERVAL}   keep_period=${KEEP_PERIOD}"
 echo "  log_interval     = ${LOG_INTERVAL}"
 echo "  global_batch     = ${GLOBAL_BATCH_SIZE}  (per-device $((GLOBAL_BATCH_SIZE/TOTAL_PROCESSES)))"
