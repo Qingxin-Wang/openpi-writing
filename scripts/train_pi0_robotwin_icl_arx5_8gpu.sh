@@ -28,7 +28,7 @@ fi
 # === Schedule (knobs env-overridable, defaults match TrainConfig) ===========
 # global_bs = 8 GPU x per_device 2 = 16 (TrainConfig.batch_size).
 export NUM_TRAIN_STEPS="${NUM_TRAIN_STEPS:-10000000}"
-export SAVE_INTERVAL="${SAVE_INTERVAL:-2500}"
+export SAVE_INTERVAL="${SAVE_INTERVAL:-20000}"
 export KEEP_PERIOD="${KEEP_PERIOD:-20000}"
 export LOG_INTERVAL="${LOG_INTERVAL:-100}"
 export NUM_WORKERS="${NUM_WORKERS:-16}"
@@ -123,6 +123,7 @@ exec "${TORCHRUN}" \
     "${WORK_DIR}/scripts/train_pytorch.py" \
     pi0_robotwin_icl_arx_x5 \
     --exp-name="${EXP_NAME}" \
+    ${RESUME:+--resume} \
     --batch-size="${GLOBAL_BATCH_SIZE}" \
     --num-train-steps="${NUM_TRAIN_STEPS}" \
     --save-interval="${SAVE_INTERVAL}" \
