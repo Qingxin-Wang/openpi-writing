@@ -194,7 +194,18 @@ def create_torch_dataset(
         delta_timestamps={
             key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
         },
-        tolerance_s=1 / dataset_meta.fps,  # Allow up to one frame of timestamp drift
+        # LeRobot uses tolerance_s for BOTH the per-episode timestamps_sync
+        # check at init AND per-item video-frame-query check at __getitem__.
+        # We've seen pick-and-place teleop with mcap-conversion artifacts:
+        # - episode-level: rare ~0.07s 1-frame drift on most fps=30 episodes
+        # - item-level: occasional ~0.15s mismatch between state timestamps
+        #   and video frame indexes near episode end (video slightly shorter
+        #   than state stream).
+        # Setting tolerance_s = 0.5s gives ~15-frame slack at 30 fps, which
+        # is generous enough to absorb both. The 3 episodes that fail this
+        # threshold (multi-second gaps) are filtered out at the DataConfig
+        # level via PICKPLACE_BAD_EPISODES.
+        tolerance_s=0.5,
         video_backend="pyav",
     )
 

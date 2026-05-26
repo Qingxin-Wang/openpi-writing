@@ -20,6 +20,7 @@ import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
+import openpi.policies.pickplace_policy as pickplace_policy
 import openpi.policies.robotwin_policy as robotwin_policy
 import openpi.policies.writing_policy as writing_policy
 import openpi.shared.download as _download
@@ -475,6 +476,68 @@ class LeRobotWritingDataConfig(DataConfigFactory):
                 "either the bundle has changed (was 487 episodes) or val_ratio/seed got out of sync with VAM"
             )
 
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=self.action_sequence_keys,
+            episodes=tuple(train_eps),
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotPickPlaceDataConfig(DataConfigFactory):
+    """Wuji pick-and-place bundle, teleop subset.
+
+    On-disk LeRobot v2.1 at ``/wuji-vepfs/wuji-il/huangsiqiao/data/pick_and_place_bundle/teleop``:
+    179 episodes, 54-D state/action (dual ARX-5 + dual dex hands), 30 fps,
+    3 cams (real ``head`` + ``cam_left_wrist`` + ``cam_right_wrist``).
+    8 tasks: ball / sponge-block / cup-body / cup-handle × left/right hand.
+
+    Unlike the writing bundle, NO val split is taken here: all 179 teleop
+    episodes go into training. Held-out evaluation lives in the sibling
+    ``eval_refs/`` subset of the bundle (12 tasks, 4 OOD) and is not loaded
+    through this DataConfig.
+    """
+
+    action_sequence_keys: Sequence[str] = ("action",)
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/image/base": "observation.images.head",
+                        "observation/image/left_wrist": "observation.images.cam_left_wrist",
+                        "observation/image/right_wrist": "observation.images.cam_right_wrist",
+                        "observation/state": "observation.state",
+                        "actions": "action",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+        data_transforms = _transforms.Group(
+            inputs=[pickplace_policy.PickPlaceInputs(model_type=model_config.model_type)],
+            outputs=[pickplace_policy.PickPlaceOutputs()],
+        )
+        model_transforms = ModelTransformFactory()(model_config)
+
+        if self.repo_id is tyro.MISSING or self.repo_id is None:
+            raise ValueError("LeRobotPickPlaceDataConfig requires repo_id pointing at pick_and_place_bundle/teleop")
+
+        # No val split (per design): all teleop episodes train. We still
+        # need an explicit `episodes` filter to drop a small set of
+        # recording-glitch episodes whose intra-episode timestamp gaps exceed
+        # what LeRobot's check_timestamps_sync will tolerate even after the
+        # global tolerance bump in data_loader.py (3 episodes, ~1.4-2.4s gap).
+        train_eps = pickplace_policy.compute_pickplace_train_episode_list(self.repo_id)
+        logging.info(
+            f"Pick-and-place train episodes: {len(train_eps)} "
+            f"(excluded {sorted(pickplace_policy.PICKPLACE_BAD_EPISODES)})"
+        )
         return dataclasses.replace(
             self.create_base_config(assets_dirs, model_config),
             repack_transforms=repack_transform,
@@ -1182,6 +1245,87 @@ _CONFIGS = [
             paligemma_variant="gemma_2b_lora",
             action_expert_variant="gemma_300m",
         ).get_freeze_filter(),
+        ema_decay=None,
+        fsdp_devices=4,
+        num_workers=16,
+        num_train_steps=10_000_000,
+        batch_size=16,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500,
+            peak_lr=5e-5,
+            decay_steps=10_000_000,
+            decay_lr=5e-5,
+        ),
+        save_interval=2_500,
+        keep_period=20_000,
+    ),
+    #
+    # Wuji pick-and-place bundle (54-D, dual ARX-5 + dual dex hands, 3 cams: head + dual wrist).
+    # Sister baseline to pi05_writing — same a54 base ckpt, same NoOpWeightLoader (ckpt is
+    # already action_dim=54-preprocessed). All 179 teleop episodes go to training (no val split).
+    #
+    TrainConfig(
+        name="pi05_pickplace",
+        project_name="pickplace-pi",
+        checkpoint_base_dir="/wuji-vepfs/wuji-il/huangsiqiao/data/checkpoints",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=54,
+            # See pi05_writing comment: 54-D discrete state input needs more
+            # than the default 200-token budget.
+            max_token_len=256,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m",
+        ),
+        data=LeRobotPickPlaceDataConfig(
+            repo_id="/wuji-vepfs/wuji-il/huangsiqiao/data/pick_and_place_bundle/teleop",
+            assets=AssetsConfig(asset_id="pickplace-bundle-teleop"),
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        pytorch_weight_path="/wuji-vepfs/wuji-il/huangsiqiao/data/openpi-assets/checkpoints/pi05_base_pytorch_a54",
+        weight_loader=weight_loaders.NoOpWeightLoader(),
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=54,
+            max_token_len=256,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m",
+        ).get_freeze_filter(),
+        ema_decay=None,
+        fsdp_devices=4,
+        num_workers=16,
+        num_train_steps=10_000_000,
+        batch_size=16,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500,
+            peak_lr=5e-5,
+            decay_steps=10_000_000,
+            decay_lr=5e-5,
+        ),
+        save_interval=2_500,
+        keep_period=20_000,
+    ),
+    #
+    # pi0 sibling for pick-and-place (pi05=False, gemma_2b honest naming — no LoRA wiring
+    # under the PT trainer regardless of variant choice).
+    #
+    TrainConfig(
+        name="pi0_pickplace",
+        project_name="pickplace-pi",
+        checkpoint_base_dir="/wuji-vepfs/wuji-il/huangsiqiao/data/checkpoints",
+        model=pi0_config.Pi0Config(
+            pi05=False,
+            action_dim=54,
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m",
+        ),
+        data=LeRobotPickPlaceDataConfig(
+            repo_id="/wuji-vepfs/wuji-il/huangsiqiao/data/pick_and_place_bundle/teleop",
+            assets=AssetsConfig(asset_id="pickplace-bundle-teleop"),
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        pytorch_weight_path="/wuji-vepfs/wuji-il/huangsiqiao/data/openpi-assets/checkpoints/pi0_base_pytorch_a54",
+        weight_loader=weight_loaders.NoOpWeightLoader(),
         ema_decay=None,
         fsdp_devices=4,
         num_workers=16,
