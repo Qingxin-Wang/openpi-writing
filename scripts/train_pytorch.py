@@ -79,16 +79,34 @@ def init_wandb(config: _config.TrainConfig, *, resuming: bool, enabled: bool = T
     if not ckpt_dir.exists():
         raise FileNotFoundError(f"Checkpoint directory {ckpt_dir} does not exist.")
 
-    if resuming:
-        run_id = (ckpt_dir / "wandb_id.txt").read_text().strip()
-        wandb.init(id=run_id, resume="must", project=config.project_name)
-    else:
+    def _start_fresh_run():
         wandb.init(
             name=config.exp_name,
             config=dataclasses.asdict(config),
             project=config.project_name,
         )
         (ckpt_dir / "wandb_id.txt").write_text(wandb.run.id)
+
+    wandb_id_path = ckpt_dir / "wandb_id.txt"
+    if resuming and wandb_id_path.exists():
+        run_id = wandb_id_path.read_text().strip()
+        try:
+            wandb.init(id=run_id, resume="must", project=config.project_name)
+        except wandb.errors.CommError as e:
+            # Falls through to a fresh run when the original run is owned by a
+            # different user on a wandb team where "member" role lacks update
+            # perms (403 upsertBucket). The ckpt-side resume is unaffected; only
+            # the wandb timeline starts a new segment.
+            logging.warning(
+                "wandb resume of run_id=%s failed (%s); starting a fresh run. "
+                "The 0->resume-step section will live on the old run; the new "
+                "run starts logging from the resume step.",
+                run_id,
+                e,
+            )
+            _start_fresh_run()
+    else:
+        _start_fresh_run()
 
 
 def setup_ddp():
