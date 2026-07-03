@@ -37,8 +37,17 @@ PICKPLACE_ACTION_DIM = 54
 PICKPLACE_BAD_EPISODES = (137, 154, 163)
 
 
-def compute_pickplace_train_episode_list(repo_root: str | pathlib.Path) -> list[int]:
-    """Return all episode_index in meta/episodes.jsonl minus PICKPLACE_BAD_EPISODES."""
+def compute_pickplace_train_episode_list(
+    repo_root: str | pathlib.Path,
+    exclude: tuple[int, ...] | None = None,
+) -> list[int]:
+    """Return all episode_index in meta/episodes.jsonl minus ``exclude``.
+
+    ``exclude=None`` defaults to PICKPLACE_BAD_EPISODES (original pick_and_place
+    bundle's 3 timestamp-glitch episodes). Pass ``exclude=()`` to keep all.
+    """
+    if exclude is None:
+        exclude = PICKPLACE_BAD_EPISODES
     repo_root = pathlib.Path(repo_root)
     episodes_path = repo_root / "meta" / "episodes.jsonl"
     if not episodes_path.exists():
@@ -50,7 +59,7 @@ def compute_pickplace_train_episode_list(repo_root: str | pathlib.Path) -> list[
             if not line:
                 continue
             ep = int(json.loads(line)["episode_index"])
-            if ep not in PICKPLACE_BAD_EPISODES:
+            if ep not in exclude:
                 keep.append(ep)
     return keep
 

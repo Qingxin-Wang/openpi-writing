@@ -488,20 +488,26 @@ class LeRobotWritingDataConfig(DataConfigFactory):
 
 @dataclasses.dataclass(frozen=True)
 class LeRobotPickPlaceDataConfig(DataConfigFactory):
-    """Wuji pick-and-place bundle, teleop subset.
+    """Wuji pick-and-place-shaped LeRobot bundle (54-D, 3 cams).
 
-    On-disk LeRobot v2.1 at ``/wuji-vepfs/wuji-il/huangsiqiao/data/pick_and_place_bundle/teleop``:
-    179 episodes, 54-D state/action (dual ARX-5 + dual dex hands), 30 fps,
-    3 cams (real ``head`` + ``cam_left_wrist`` + ``cam_right_wrist``).
-    8 tasks: ball / sponge-block / cup-body / cup-handle × left/right hand.
+    Used by:
+    - ``pi05_pickplace`` / ``pi0_pickplace`` on
+      ``/wuji-vepfs/wuji-il/huangsiqiao/data/pick_and_place_bundle/teleop`` (179 ep, 8 task)
+    - ``pi05_pnp_left_500`` on
+      ``/wuji-vepfs/wuji-il/huangsiqiao/data/pnp_left_500_lerobot`` (502 ep, 1 task)
 
-    Unlike the writing bundle, NO val split is taken here: all 179 teleop
-    episodes go into training. Held-out evaluation lives in the sibling
-    ``eval_refs/`` subset of the bundle (12 tasks, 4 OOD) and is not loaded
-    through this DataConfig.
+    Both share the same dataclass schema (54-D state/action, dual ARX-5 + dual
+    dex hands, head + dual-wrist cams). They differ in which episodes to drop:
+    the original pick_and_place bundle has 3 LeRobot timestamp-sync glitches
+    (137, 154, 163), pnp_left_500 was pre-filtered at mcap→LeRobot time and
+    needs nothing dropped. Pass ``exclude_episodes=()`` to skip filtering.
     """
 
     action_sequence_keys: Sequence[str] = ("action",)
+    # None  -> default to pickplace_policy.PICKPLACE_BAD_EPISODES (back-compat)
+    # ()    -> no exclusion
+    # tuple -> custom drop list
+    exclude_episodes: tuple[int, ...] | None = None
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
@@ -528,15 +534,20 @@ class LeRobotPickPlaceDataConfig(DataConfigFactory):
         if self.repo_id is tyro.MISSING or self.repo_id is None:
             raise ValueError("LeRobotPickPlaceDataConfig requires repo_id pointing at pick_and_place_bundle/teleop")
 
-        # No val split (per design): all teleop episodes train. We still
-        # need an explicit `episodes` filter to drop a small set of
+        # No val split: all episodes train. Drop a (possibly empty) set of
         # recording-glitch episodes whose intra-episode timestamp gaps exceed
-        # what LeRobot's check_timestamps_sync will tolerate even after the
-        # global tolerance bump in data_loader.py (3 episodes, ~1.4-2.4s gap).
-        train_eps = pickplace_policy.compute_pickplace_train_episode_list(self.repo_id)
+        # what LeRobot's check_timestamps_sync will tolerate.
+        exclude = (
+            pickplace_policy.PICKPLACE_BAD_EPISODES
+            if self.exclude_episodes is None
+            else self.exclude_episodes
+        )
+        train_eps = pickplace_policy.compute_pickplace_train_episode_list(
+            self.repo_id, exclude=exclude
+        )
         logging.info(
-            f"Pick-and-place train episodes: {len(train_eps)} "
-            f"(excluded {sorted(pickplace_policy.PICKPLACE_BAD_EPISODES)})"
+            f"Pick-and-place-shaped train episodes: {len(train_eps)} "
+            f"(repo={self.repo_id}, excluded {sorted(exclude)})"
         )
         return dataclasses.replace(
             self.create_base_config(assets_dirs, model_config),
@@ -1303,6 +1314,54 @@ _CONFIGS = [
             decay_lr=5e-5,
         ),
         save_interval=2_500,
+        keep_period=20_000,
+    ),
+    #
+    # Wuji pnp_left_500: single-task left-arm pick-and-place LeRobot bundle
+    # built from 502 rosbags (54-D dual ARX-5 + dual dex hands, 3 cams, 30 fps,
+    # ~154k frames, one task "Pick up the object with the left hand and place
+    # it in the basket."). Same dataclass schema as pi05_pickplace, so reuses
+    # LeRobotPickPlaceDataConfig with exclude_episodes=() (already filtered at
+    # mcap-conversion time). Schedule per user: 100k step, save+keep every 20k.
+    #
+    TrainConfig(
+        name="pi05_pnp_left_500",
+        project_name="pickplace-pi",
+        checkpoint_base_dir="/wuji-vepfs/wuji-il/huangsiqiao/data/checkpoints",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=54,
+            max_token_len=256,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m",
+        ),
+        data=LeRobotPickPlaceDataConfig(
+            repo_id="/wuji-vepfs/wuji-il/huangsiqiao/data/pnp_left_500_lerobot",
+            assets=AssetsConfig(asset_id="pnp-left-500-lerobot"),
+            base_config=DataConfig(prompt_from_task=True),
+            exclude_episodes=(),
+        ),
+        pytorch_weight_path="/wuji-vepfs/wuji-il/huangsiqiao/data/openpi-assets/checkpoints/pi05_base_pytorch_a54",
+        weight_loader=weight_loaders.NoOpWeightLoader(),
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=54,
+            max_token_len=256,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m",
+        ).get_freeze_filter(),
+        ema_decay=None,
+        fsdp_devices=4,
+        num_workers=16,
+        num_train_steps=100_000,
+        batch_size=16,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500,
+            peak_lr=5e-5,
+            decay_steps=100_000,
+            decay_lr=5e-5,
+        ),
+        save_interval=20_000,
         keep_period=20_000,
     ),
     #
